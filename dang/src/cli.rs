@@ -15,6 +15,7 @@ use gdbstub::stub::GdbStub;
 use gdbstub::stub::SingleThreadStopReason;
 use gdbstub::target::Target;
 use std::net::TcpStream;
+use std::sync::mpsc::SyncSender;
 use std::{net::TcpListener, path::PathBuf};
 
 #[derive(FromArgs, Debug, Clone)]
@@ -257,12 +258,16 @@ pub fn start_with_args_and_listener_silent(
     mapping_path: PathBuf,
     elf: PathBuf,
     listener: TcpListener,
+    ready_tx: SyncSender<()>,
 ) -> DynResult<()> {
     // Initialize logger with error level only to suppress most output
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error"))
         .try_init();
 
     let mut emu = Waver::new(wave_path, mapping_path, elf).expect("Could not create wave runtime");
+
+    // Signal that the waveform is loaded and we are ready to accept a connection
+    let _ = ready_tx.send(());
 
     let connection: Box<dyn ConnectionExt<Error = std::io::Error>> =
         { Box::new(wait_for_tcp_with_listener(listener)?) };

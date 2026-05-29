@@ -274,14 +274,17 @@ impl App {
         let mapping_path = cli_args.mapping_path.clone();
         let elf_path = cli_args.elf.clone();
 
+        // Channel used to detect when dang has finished loading the waveform
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(0);
+
         // Start dang GDB stub in a separate thread
         let dang_handle = thread::spawn(move || {
-            dang::start_with_args_and_listener_silent(wave_path, mapping_path, elf_path, listener)
+            dang::start_with_args_and_listener_silent(wave_path, mapping_path, elf_path, listener, ready_tx)
                 .expect("Failed to start dang");
         });
 
-        // Give dang time to start
-        thread::sleep(std::time::Duration::from_millis(300));
+        // Wait until dang signals that the waveform is loaded and it is ready to accept
+        ready_rx.recv().expect("dang thread exited before signalling ready");
 
         // Create shucks client connected to dang
         let mut shucks_client = Client::new_with_port(port);

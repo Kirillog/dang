@@ -147,7 +147,7 @@ impl Loaded {
             .map(|val| {
                 py_signals
                     .remove(format!("x{val}").as_str())
-                    .expect("No signal named x{val} provided")
+                    .unwrap_or_else(|| make_zero_signal(32, 0))
             })
             .collect();
 
@@ -170,6 +170,22 @@ impl Loaded {
             cursor,
         })
     }
+}
+
+/// Build a constant-zero wellen Signal for registers not present in the waveform
+/// (e.g. RISC-V x0 which is hardwired to zero and never recorded, or untraced callee-saved regs).
+/// A single change at `time_table_idx` with value 0 is inserted so that any later `get_val` call
+/// returns 0 instead of panicking.
+fn make_zero_signal(width: u32, time_table_idx: TimeTableIdx) -> Signal {
+    let byte_len = ((width + 7) / 8) as usize;
+    let zero_bytes = vec![0u8; byte_len];
+    let mut builder =
+        wellen::BitVectorBuilder::new(wellen::States::Two, width);
+    builder.add_change(
+        time_table_idx,
+        SignalValue::Binary(&zero_bytes, width),
+    );
+    builder.finish(wellen::SignalRef::from_index(0xdeadbeef).unwrap())
 }
 
 static INIT: Once = std::sync::Once::new();
@@ -207,7 +223,8 @@ pub fn validate_get_signals(script: &Path, fn_name: &str, wave_path: &Path) -> V
     let mut events = vec![];
 
     let script_content = fs::read_to_string(script);
-    if let Err(_) = script_content {
+    if let Err(e) = script_content {
+        eprintln!("[validate_get_signals] ERROR: failed to read script: {e}");
         events.push(MappingParsedEvents::FileStatus);
         return ValidationResult::from_events(events);
     }
@@ -220,8 +237,11 @@ pub fn validate_get_signals(script: &Path, fn_name: &str, wave_path: &Path) -> V
             PyModule::from_code_bound(py, script_content.as_str(), "signal_get.py", "signal_get");
 
         let activators = match activators {
-            Ok(module) => module,
+            Ok(module) => {
+                module
+            }
             Err(e) => {
+                eprintln!("[validate_get_signals] ERROR: failed to load Python module: {e}");
                 events.push(MappingParsedEvents::WaveCreationStatus);
                 return Err(e);
             }
@@ -235,6 +255,7 @@ pub fn validate_get_signals(script: &Path, fn_name: &str, wave_path: &Path) -> V
                 w
             }
             Err(e) => {
+                eprintln!("[validate_get_signals] ERROR: failed to load waveform: {e}");
                 events.push(MappingParsedEvents::WaveCreationStatus);
                 return Err(pyo3::PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                     e.to_string(),
@@ -251,6 +272,7 @@ pub fn validate_get_signals(script: &Path, fn_name: &str, wave_path: &Path) -> V
                 f
             }
             Err(e) => {
+                eprintln!("[validate_get_signals] ERROR: function '{fn_name}' not found: {e}");
                 events.push(MappingParsedEvents::FunctionStatus);
                 events.push(MappingParsedEvents::GetFnCall);
                 return Err(e);
@@ -264,6 +286,7 @@ pub fn validate_get_signals(script: &Path, fn_name: &str, wave_path: &Path) -> V
                 result.extract()?
             }
             Err(e) => {
+                eprintln!("[validate_get_signals] ERROR: function call failed: {e}");
                 events.push(MappingParsedEvents::GetFnCall);
                 return Err(e);
             }
@@ -279,7 +302,13 @@ pub fn validate_get_signals(script: &Path, fn_name: &str, wave_path: &Path) -> V
         // Convert to wellen signals
         let wellen_signals: HashMap<String, wellen::Signal> = py_signals
             .into_iter()
-            .filter_map(|(name, signal)| signal.to_wellen_signal().map(|s| (name, s)))
+            .filter_map(|(name, signal)| {
+                let result = signal.to_wellen_signal();
+                if result.is_none() {
+                    eprintln!("[validate_get_signals] WARNING: to_wellen_signal() returned None for signal '{name}' (Arc has multiple references)");
+                }
+                result.map(|s| (name, s))
+            })
             .collect();
 
         // Check for required signals
